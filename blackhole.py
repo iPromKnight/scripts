@@ -10,9 +10,9 @@ import uuid
 from datetime import datetime
 # import urllib
 from shared.discord import discordError, discordUpdate
-from shared.shared import realdebrid, torbox, blackhole, plex, checkRequiredEnvs
-from shared.arr import Arr, Radarr, Sonarr
-from shared.debrid import TorrentBase, RealDebridTorrent, RealDebridMagnet, TorboxTorrent, TorboxMagnet
+from shared.shared import realdebrid, torbox, alldebrid, blackhole, plex, checkRequiredEnvs
+from shared.arr import Arr, Radarr, Sonarr, Whisparr
+from shared.debrid import TorrentBase, RealDebridTorrent, RealDebridMagnet, TorboxTorrent, TorboxMagnet, AllDebridTorrent, AllDebridMagnet
 
 _print = print
 
@@ -22,6 +22,7 @@ def print(*values: object):
 requiredEnvs = {
     'Blackhole base watch path': (blackhole['baseWatchPath'],),
     'Blackhole Radarr path': (blackhole['radarrPath'],),
+    'Blackhole Whisparr path': (blackhole['whisparrPath'],),
     'Blackhole Sonarr path': (blackhole['sonarrPath'],),
     'Blackhole fail if not cached': (blackhole['failIfNotCached'],),
     'Blackhole RD mount refresh seconds': (blackhole['rdMountRefreshSeconds'],),
@@ -45,9 +46,9 @@ class TorrentFileInfo():
             self.isTorrentOrMagnet = isTorrentOrMagnet
             self.isDotTorrentFile = isDotTorrentFile
 
-    def __init__(self, filename, isRadarr) -> None:
+    def __init__(self, filename, arr_type) -> None:
         print('filename:', filename)
-        baseBath = getPath(isRadarr)
+        baseBath = getPath(arr_type)
         uniqueId = str(uuid.uuid4())[:8]  # Generate a unique identifier
         isDotTorrentFile = filename.casefold().endswith('.torrent')
         isTorrentOrMagnet = isDotTorrentFile or filename.casefold().endswith('.magnet')
@@ -59,10 +60,10 @@ class TorrentFileInfo():
         self.fileInfo = self.FileInfo(filename, filenameWithoutExt, filePath, filePathProcessing, folderPathCompleted)
         self.torrentInfo = self.TorrentInfo(isTorrentOrMagnet, isDotTorrentFile)
 
-def getPath(isRadarr, create=False):
+def getPath(arr_type, create=False):
     baseWatchPath = blackhole['baseWatchPath']
     absoluteBaseWatchPath = baseWatchPath if os.path.isabs(baseWatchPath) else os.path.abspath(baseWatchPath)
-    finalPath = os.path.join(absoluteBaseWatchPath, blackhole['radarrPath'] if isRadarr else blackhole['sonarrPath'])
+    finalPath = os.path.join(absoluteBaseWatchPath, get_final_path(arr_type))
 
     if create:
         for sub_path in ['', 'processing', 'completed']:
@@ -71,6 +72,15 @@ def getPath(isRadarr, create=False):
                 os.makedirs(path_to_check)
         
     return finalPath
+
+def get_final_path(arr_type):
+    if arr_type == 'radarr':
+        return blackhole['radarrPath']
+    elif arr_type == 'whisparr':
+        return blackhole['whisparrPath']
+    elif arr_type == 'sonarr':
+        return blackhole['sonarrPath']
+    raise ValueError("Invalid arr_type")
 
 # From Radarr Radarr/src/NzbDrone.Core/Organizer/FileNameBuilder.cs
 def cleanFileName(name):
@@ -169,7 +179,7 @@ async def processTorrent(torrent: TorrentBase, file: TorrentFileInfo, arr: Arr) 
                 print("Non-cached incompatible hash sized torrent")
                 torrent.delete()
                 return False
-            await asyncio.sleep(1)
+            await asyncio.sleep(10)
         elif status == torrent.STATUS_ERROR:
             return False
         elif status == torrent.STATUS_COMPLETED:
@@ -250,7 +260,7 @@ async def processTorrent(torrent: TorrentBase, file: TorrentFileInfo, arr: Arr) 
 
             return False
 
-async def processFile(file: TorrentFileInfo, arr: Arr, isRadarr):
+async def processFile(file: TorrentFileInfo, arr: Arr, arr_type) -> None:
     try:
         _print = globals()['print']
 
@@ -288,8 +298,10 @@ async def processFile(file: TorrentFileInfo, arr: Arr, isRadarr):
                 torrentConstructors.append(RealDebridTorrent if file.torrentInfo.isDotTorrentFile else RealDebridMagnet)
             if torbox['enabled']:
                 torrentConstructors.append(TorboxTorrent if file.torrentInfo.isDotTorrentFile else TorboxMagnet)
+            if alldebrid['enabled']:
+                 torrentConstructors.append(AllDebridTorrent if file.torrentInfo.isDotTorrentFile else AllDebridMagnet)
 
-            onlyLargestFile = isRadarr or bool(re.search(r'S[\d]{2}E[\d]{2}(?![\W_][\d]{2}[\W_])', file.fileInfo.filename))
+            onlyLargestFile = arr_type == 'radarr' or bool(re.search(r'S[\d]{2}E[\d]{2}(?![\W_][\d]{2}[\W_])', file.fileInfo.filename))
             if not blackhole['failIfNotCached']:
                 torrents = [constructor(f, fileData, file, blackhole['failIfNotCached'], onlyLargestFile) for constructor in torrentConstructors]
                 results = await asyncio.gather(*(processTorrent(torrent, file, arr) for torrent in torrents))
@@ -336,29 +348,33 @@ async def fail(torrent: TorrentBase, arr: Arr):
         await asyncio.gather(*failTasks)
     print(f"Failed")
     
-def getFiles(isRadarr):
+def getFiles(arr_type):
     print('getFiles')
-    files = (TorrentFileInfo(filename, isRadarr) for filename in os.listdir(getPath(isRadarr)) if filename not in ['processing', 'completed'])
+    files = (TorrentFileInfo(filename, arr_type) for filename in os.listdir(getPath(arr_type)) if filename not in ['processing', 'completed'])
     return [file for file in files if file.torrentInfo.isTorrentOrMagnet]
 
-async def on_created(isRadarr):
+async def on_created(arr_type):
     print("Enter 'on_created'")
     try:
-        print('radarr/sonarr:', 'radarr' if isRadarr else 'sonarr')
+        print('radarr/sonarr/whisparr:', arr_type)
 
-        if isRadarr:
+        if arr_type == 'radarr':
             arr = Radarr()
-        else:
+        elif arr_type == 'sonarr':
             arr = Sonarr()
+        elif arr_type == 'whisparr':
+            arr = Whisparr()
+        else:
+            raise ValueError("Invalid arr_type")
 
         futures: list[asyncio.Future] = []
         firstGo = True
         
         # Consider switching to a queue
         while firstGo or not all(future.done() for future in futures):
-            files = getFiles(isRadarr)
+            files = getFiles(arr_type)
             if files:
-                futures.append(asyncio.gather(*(processFile(file, arr, isRadarr) for file in files)))
+                futures.append(asyncio.gather(*(processFile(file, arr, arr_type) for file in files)))
             elif firstGo:
                 print('No torrent files found')
             firstGo = False
@@ -375,4 +391,4 @@ async def on_created(isRadarr):
     print("Exit 'on_created'")
 
 if __name__ == "__main__":
-    asyncio.run(on_created(isRadarr=sys.argv[1] == 'radarr'))
+    asyncio.run(on_created(arr_type=sys.argv[1] == 'radarr'))

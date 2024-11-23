@@ -8,11 +8,11 @@ from urllib.parse import urljoin
 from datetime import datetime
 from shared.discord import discordUpdate
 from shared.requests import retryRequest
-from shared.shared import realdebrid, torbox, mediaExtensions, checkRequiredEnvs
+from shared.shared import realdebrid, torbox, alldebrid, mediaExtensions, checkRequiredEnvs
 
 def validateDebridEnabled():
-    if not realdebrid['enabled'] and not torbox['enabled']:
-        return False, "At least one of RealDebrid or Torbox must be enabled."
+    if not realdebrid['enabled'] and not torbox['enabled'] and not alldebrid['enabled']:
+        return False, "At least one of RealDebrid or Torbox or AllDebrid must be enabled."
     return True
 
 def validateRealdebridHost():
@@ -40,6 +40,39 @@ def validateRealdebridApiKey():
 
 def validateRealdebridMountTorrentsPath():
     path = realdebrid['mountTorrentsPath']
+    if os.path.exists(path) and any(os.path.isdir(os.path.join(path, child)) for child in os.listdir(path)):
+        return True
+    else:
+        return False, "Path does not exist or has no children."
+
+
+def validateAlldebridHost():
+    url = urljoin(alldebrid['host'], "time")
+    try:
+        response = requests.get(url)
+        return response.status_code == 200
+    except Exception as e:
+        return False
+
+
+def validateAlldebridApiKey():
+    url = urljoin(alldebrid['host'], "user")
+    headers = {'Authorization': f'Bearer {alldebrid["apiKey"]}'}
+    try:
+        response = requests.get(url, headers=headers)
+
+        if response.status_code == 401:
+            return False, "Invalid or expired API key."
+        elif response.status_code == 403:
+            return False, "Permission denied, account locked."
+    except Exception as e:
+        return False
+
+    return True
+
+
+def validateAlldebridMountTorrentsPath():
+    path = alldebrid['mountTorrentsPath']
     if os.path.exists(path) and any(os.path.isdir(os.path.join(path, child)) for child in os.listdir(path)):
         return True
     else:
@@ -76,7 +109,7 @@ def validateTorboxMountTorrentsPath():
         return False, "Path does not exist or has no children."
 
 requiredEnvs = {
-    'RealDebrid/TorBox enabled': (True, validateDebridEnabled),
+    'RealDebrid/TorBox/AllDebrid enabled': (True, validateDebridEnabled),
 }
 
 if realdebrid['enabled']:
@@ -91,6 +124,13 @@ if torbox['enabled']:
         'Torbox host': (torbox['host'], validateTorboxHost),
         'Torbox API key': (torbox['apiKey'], validateTorboxApiKey, True),
         'Torbox mount torrents path': (torbox['mountTorrentsPath'], validateTorboxMountTorrentsPath)
+    })
+
+if alldebrid['enabled']:
+    requiredEnvs.update({
+        'AllDebrid host': (alldebrid['host'], validateAlldebridHost),
+        'AllDebrid API key': (alldebrid['apiKey'], validateAlldebridApiKey, True),
+        'AllDebrid mount torrents path': (alldebrid['mountTorrentsPath'], validateAlldebridMountTorrentsPath)
     })
 
 checkRequiredEnvs(requiredEnvs)
@@ -336,6 +376,224 @@ class RealDebrid(TorrentBase):
             return self.STATUS_ERROR
         return status
 
+class AllDebrid(TorrentBase):
+    def __init__(self, f, fileData, file, failIfNotCached, onlyLargestFile) -> None:
+        super().__init__(f, fileData, file, failIfNotCached, onlyLargestFile)
+        self.headers = {'Authorization': f'Bearer {alldebrid["apiKey"]}', 'agent': 'Blackhole'}
+        self.mountTorrentsPath = alldebrid["mountTorrentsPath"]
+
+    def submitTorrent(self):
+        if self.failIfNotCached:
+            instantAvailability = self._getInstantAvailability()
+            self.print('instantAvailability:', not not instantAvailability)
+            if not instantAvailability:
+                return False
+
+        return not not self.addTorrent()
+
+    def _getInstantAvailability(self, refresh=False):
+        if refresh or not self._instantAvailability:
+            torrentHash = self.getHash()
+            self.print('hash:', torrentHash)
+
+            if len(torrentHash) != 40:
+                self.incompatibleHashSize = True
+                return True
+
+            instantAvailabilityRequest = retryRequest(
+                lambda: requests.get(
+                    urljoin(alldebrid['host'], f"magnet/instant"),
+                    params={"magnets[]": torrentHash, "agent": "Blackhole"},
+                    headers=self.headers,
+                ),
+                print=self.print
+            )
+            if instantAvailabilityRequest is None:
+                return None
+
+            instantAvailabilities = instantAvailabilityRequest.json().get("magnets", [])
+            self.print('instantAvailabilities:', instantAvailabilities)
+
+            for magnet in instantAvailabilities:
+                if magnet["hash"] == torrentHash and magnet.get("instant"):
+                    self._instantAvailability = magnet.get("files")
+                    break
+
+        return self._instantAvailability
+
+    async def getInfo(self, refresh=False):
+        self._enforceId()
+
+        if refresh or not self._info:
+            infoRequest = retryRequest(
+                lambda: requests.get(
+                    urljoin('https://api.alldebrid.com/v4.1/', f"magnet/status"),
+                    params={"id": self.id, "agent": "Blackhole"},
+                    headers=self.headers,
+                ),
+                print=self.print
+            )
+            if infoRequest is None:
+                self._info = None
+            else:
+                json_info = infoRequest.json()
+                if json_info is None:
+                    self._info = None
+                    return None
+                data = json_info.get("data")
+                if data is None:
+                    self._info = None
+                    return None
+                info = data.get("magnets", {})
+                if "statusCode" in info:
+                    info["status"] = self._normalize_status(info["statusCode"])
+                if "downloaded" in info and "size" in info and info["size"] != 0:
+                    info["progress"] = info["downloaded"] / info["size"] * 100
+                else:
+                    info["progress"] = 0
+                self._info = info
+
+        return self._info
+
+    async def selectFiles(self):
+        self._enforceId()
+        self.print("File selection is automatically handled by AllDebrid.")
+        return True
+
+    def delete(self):
+        self._enforceId()
+
+        deleteRequest = retryRequest(
+            lambda: requests.delete(
+                urljoin(alldebrid['host'], f"magnet/delete"),
+                params={"id": self.id, "agent": "Blackhole"},
+                headers=self.headers,
+            ),
+            print=self.print
+        )
+        return not not deleteRequest
+
+    async def getTorrentPath(self):
+        info = await self.getInfo()
+        filename = info['filename']
+        originalFilename = info['files'][0]['n']
+
+        folderPathMountFilenameTorrent = os.path.join(self.mountTorrentsPath, filename)
+        folderPathMountOriginalFilenameTorrent = os.path.join(self.mountTorrentsPath, originalFilename)
+        folderPathMountOriginalFilenameWithoutExtTorrent = os.path.join(self.mountTorrentsPath,
+                                                                        os.path.splitext(originalFilename)[0])
+
+        if os.path.exists(folderPathMountFilenameTorrent) and os.listdir(folderPathMountFilenameTorrent):
+            folderPathMountTorrent = folderPathMountFilenameTorrent
+        elif os.path.exists(folderPathMountOriginalFilenameTorrent) and os.listdir(
+                folderPathMountOriginalFilenameTorrent):
+            folderPathMountTorrent = folderPathMountOriginalFilenameTorrent
+        elif (originalFilename.endswith(('.mkv', '.mp4')) and
+              os.path.exists(folderPathMountOriginalFilenameWithoutExtTorrent) and os.listdir(
+                    folderPathMountOriginalFilenameWithoutExtTorrent)):
+            folderPathMountTorrent = folderPathMountOriginalFilenameWithoutExtTorrent
+        else:
+            folderPathMountTorrent = None
+
+        return folderPathMountTorrent
+
+    def _addTorrentFile(self):
+        if not self.f:
+            self.print("No .torrent file provided for upload.")
+            return None
+
+        url = urljoin(alldebrid['host'], "magnet/upload/file")
+        files = {'files[0]': ('file.torrent', self.f, 'application/x-bittorrent')}
+        params = {
+            'agent': 'Blackhole'
+        }
+
+        upload_request = retryRequest(
+            lambda: requests.post(url, params=params, headers=self.headers, files=files),
+            print=self.print
+        )
+
+        if upload_request is None:
+            self.print("Failed to upload .torrent file to AllDebrid.")
+            return None
+
+        response = upload_request.json()
+        self.print(f"Response from AllDebrid: {response}")
+
+        if response.get('status') != 'success':
+            self.print(f"Error: {response.get('error', {}).get('message', 'Unknown error')}")
+            return None
+
+        files_data = response.get('data', {}).get('files', [])
+        if not files_data:
+            self.print("No files found in the response.")
+            return None
+
+        self.id = files_data[0].get('id')
+        if not self.id:
+            self.print("Torrent ID not found in the files data.")
+            return None
+
+        self.print(f".torrent file uploaded successfully with ID: {self.id}")
+        return self.id
+
+    def _addMagnetFile(self):
+        if not self.fileData or not self.fileData.startswith("magnet:?"):
+            self.print("Invalid or missing magnet URI.")
+            return None
+
+        data = {'magnets[]': self.fileData}
+        url = urljoin(alldebrid['host'], "magnet/upload")
+
+        add_request = retryRequest(
+            lambda: requests.post(url, headers=self.headers, data=data, params={"agent": "Blackhole"}),
+            print=self.print
+        )
+
+        if add_request is None:
+            self.print("Failed to upload magnet link to AllDebrid.")
+            return None
+
+        response = add_request.json()
+        self.print(f"Response info: {response}")
+
+        if response.get('status') != 'success':
+            self.print(f"Error: {response.get('error', {}).get('message', 'Unknown error')}")
+            return None
+
+        files_data = response.get('data', {}).get('magnets', [])
+        if not files_data:
+            self.print("No files found in the response.")
+            return None
+
+        self.id = files_data[0].get('id')
+        if not self.id:
+            self.print("Magnet ID not found in the response.")
+            return None
+
+        self.print(f"Magnet uploaded successfully with ID: {self.id}")
+        return files_data
+
+    def _normalize_status(self, status_code):
+        status_mapping = {
+            0: self.STATUS_WAITING_FILES_SELECTION,  # Processing: In Queue
+            1: self.STATUS_DOWNLOADING,  # Processing: Downloading
+            2: self.STATUS_DOWNLOADING,  # Processing: Compressing / Moving
+            3: self.STATUS_DOWNLOADING,  # Processing: Uploading
+            4: self.STATUS_COMPLETED,  # Finished: Ready
+            5: self.STATUS_ERROR,  # Error: Upload fail
+            6: self.STATUS_ERROR,  # Error: Internal error on unpacking
+            7: self.STATUS_ERROR,  # Error: Not downloaded in 20 min
+            8: self.STATUS_ERROR,  # Error: File too big
+            9: self.STATUS_ERROR,  # Error: Internal error
+            10: self.STATUS_ERROR,  # Error: Download took more than 72h
+            11: self.STATUS_ERROR,  # Error: Deleted on the hoster website
+        }
+
+        normalized_status = status_mapping.get(status_code, self.STATUS_ERROR)
+        self.print(f"Normalized status: {normalized_status} (code: {status_code})")
+        return normalized_status
+
 class Torbox(TorrentBase):
     def __init__(self, f, fileData, file, failIfNotCached, onlyLargestFile) -> None:
         super().__init__(f, fileData, file, failIfNotCached, onlyLargestFile)
@@ -525,4 +783,10 @@ class TorboxTorrent(Torbox, Torrent):
     pass
 
 class TorboxMagnet(Torbox, Magnet):
+    pass
+
+class AllDebridTorrent(AllDebrid, Torrent):
+    pass
+
+class AllDebridMagnet(AllDebrid, Magnet):
     pass

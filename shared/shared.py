@@ -30,6 +30,7 @@ blackhole = {
     'baseWatchPath': env.string('BLACKHOLE_BASE_WATCH_PATH', default=None),
     'radarrPath': env.string('BLACKHOLE_RADARR_PATH', default=None),
     'sonarrPath': env.string('BLACKHOLE_SONARR_PATH', default=None),
+    'whisparrPath': env.string('BLACKHOLE_WHISPARR_PATH', default=None),
     'failIfNotCached': env.bool('BLACKHOLE_FAIL_IF_NOT_CACHED', default=None),
     'rdMountRefreshSeconds': env.integer('BLACKHOLE_RD_MOUNT_REFRESH_SECONDS', default=None),
     'waitForTorrentTimeout': env.integer('BLACKHOLE_WAIT_FOR_TORRENT_TIMEOUT', default=None),
@@ -56,11 +57,19 @@ overseerr = {
 }
 
 sonarr = {
+    'enabled': env.bool('SONARR_ENABLED', default=False),
     'host': env.string('SONARR_HOST', default=None),
     'apiKey': env.string('SONARR_API_KEY', default=None)
 }
 
+whisparr = {
+    'enabled': env.bool('WHISPARR_ENABLED', default=False),
+    'host': env.string('WHISPARR_HOST', default=None),
+    'apiKey': env.string('WHISPARR_API_KEY', default=None)
+}
+
 radarr = {
+    'enabled': env.bool('RADARR_ENABLED', default=False),
     'host': env.string('RADARR_HOST', default=None),
     'apiKey': env.string('RADARR_API_KEY', default=None)
 }
@@ -82,6 +91,13 @@ torbox = {
     'host': env.string('TORBOX_HOST', default=None),
     'apiKey': env.string('TORBOX_API_KEY', default=None),
     'mountTorrentsPath': env.string('TORBOX_MOUNT_TORRENTS_PATH', default=None)
+}
+
+alldebrid = {
+    'enabled': env.bool('ALLDEBRID_ENABLED', default=None),
+    'host': env.string('ALLDEBRID_HOST', default=None),
+    'apiKey': env.string('ALLDEBRID_API_KEY', default=None),
+    'mountTorrentsPath': env.string('ALLDEBRID_MOUNT_TORRENTS_PATH', default=None)
 }
 
 trakt = {
@@ -191,7 +207,7 @@ def checkRequiredEnvs(requiredEnvs):
     previousSuccess = True
     for envName, envProps in requiredEnvs.items():
         envValue, validate, requiresPreviousSuccess = unpackEnvProps(envProps)
-        
+
         if envValue is None or envValue == "":
             print(f"Error: {envName} is missing. Please check your .env file.")
             previousSuccess = False

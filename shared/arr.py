@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Type, List
 import requests
-from shared.shared import sonarr, radarr, checkRequiredEnvs
+from shared.shared import sonarr, radarr, whisparr, checkRequiredEnvs
 from shared.requests import retryRequest
 
 def validateSonarrHost():
@@ -42,12 +42,46 @@ def validateRadarrApiKey():
     
     return True
 
-requiredEnvs = {
-    'Sonarr host': (sonarr['host'], validateSonarrHost),
-    'Sonarr API key': (sonarr['apiKey'], validateSonarrApiKey, True),
-    'Radarr host': (radarr['host'], validateRadarrHost),
-    'Radarr API key': (radarr['apiKey'], validateRadarrApiKey, True)
-}
+
+def validateWhisparrHost():
+    url = f"{whisparr['host']}/login"
+    try:
+        response = requests.get(url)
+        return response.status_code == 200
+    except Exception as e:
+        return False
+
+
+def validateWhisparrApiKey():
+    url = f"{whisparr['host']}/api/v3/system/status?apikey={whisparr['apiKey']}"
+    try:
+        response = requests.get(url)
+        if response.status_code == 401:
+            return False, "Invalid or expired API key."
+    except Exception as e:
+        return False
+
+    return True
+
+requiredEnvs = {}
+
+if sonarr['enabled']:
+    requiredEnvs.update({
+        'Sonarr host': (sonarr['host'], validateSonarrHost),
+        'Sonarr API key': (sonarr['apiKey'], validateSonarrApiKey, True)
+    })
+
+if radarr['enabled']:
+    requiredEnvs.update({
+        'Radarr host': (radarr['host'], validateRadarrHost),
+        'Radarr API key': (radarr['apiKey'], validateRadarrApiKey, True)
+    })
+
+if whisparr['enabled']:
+    requiredEnvs.update({
+        'Whisparr host': (whisparr['host'], validateWhisparrHost),
+        'Whisparr API key': (whisparr['apiKey'], validateWhisparrApiKey, True)
+    })
 
 checkRequiredEnvs(requiredEnvs)
 
@@ -339,6 +373,21 @@ class Radarr(Arr):
 
     def __init__(self) -> None:
         super().__init__(Radarr.host, Radarr.apiKey, Radarr.endpoint, Radarr.fileEndpoint, Radarr.childIdName, Radarr.childName, Radarr.grandchildName, Movie, MovieFile, MovieHistory)
+
+    def _automaticSearchJson(self, media: Media, childId: int):
+        return {"name": f"{self.childName}Search", f"{self.endpoint}Ids": [media.id]}
+
+class Whisparr(Arr):
+    host = whisparr['host']
+    apiKey = whisparr['apiKey']
+    endpoint = 'movie'
+    fileEndpoint = 'moviefile'
+    childIdName = None
+    childName = 'Movies'
+    grandchildName = 'Movie'
+
+    def __init__(self) -> None:
+        super().__init__(Whisparr.host, Whisparr.apiKey, Whisparr.endpoint, Whisparr.fileEndpoint, Whisparr.childIdName, Whisparr.childName, Whisparr.grandchildName, Movie, MovieFile, MovieHistory)
 
     def _automaticSearchJson(self, media: Media, childId: int):
         return {"name": f"{self.childName}Search", f"{self.endpoint}Ids": [media.id]}

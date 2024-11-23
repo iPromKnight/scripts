@@ -2,10 +2,10 @@ import os
 import argparse
 import time
 import traceback
-from shared.debrid import validateRealdebridMountTorrentsPath, validateTorboxMountTorrentsPath
+from shared.debrid import validateRealdebridMountTorrentsPath, validateTorboxMountTorrentsPath, validateAlldebridMountTorrentsPath
 from shared.arr import Sonarr, Radarr
 from shared.discord import discordUpdate, discordError
-from shared.shared import repair, realdebrid, torbox, intersperse, ensureTuple
+from shared.shared import repair, realdebrid, torbox, intersperse, ensureTuple, alldebrid
 from datetime import datetime
 
 def parseInterval(intervalStr):
@@ -142,7 +142,8 @@ def main():
 def unsafe():
     return (args.mode == 'symlink' and 
         ((realdebrid['enabled'] and not ensureTuple(validateRealdebridMountTorrentsPath())[0]) or 
-        (torbox['enabled'] and not ensureTuple(validateTorboxMountTorrentsPath())[0])))
+        (torbox['enabled'] and not ensureTuple(validateTorboxMountTorrentsPath())[0])) or
+        (alldebrid['enabled'] and not ensureTuple(validateAlldebridMountTorrentsPath())[0]))
 
 if runIntervalSeconds > 0:
     while True:
